@@ -7,9 +7,9 @@ on:
   workflow_dispatch:        # 수동 실행 지원
     inputs:
       days_back:
-        description: '조회 기간 (오늘 기준 ±일수, 기본 90일)'
+        description: '조회 기간 (오늘 기준 ±일수, 기본 7일)'
         required: false
-        default: '90'
+        default: '7'
 
 jobs:
   scrape:
