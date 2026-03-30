@@ -1,0 +1,63 @@
+name: DART IPO Scraper
+
+on:
+  schedule:
+    # 평일 09:00 / 15:00 / 21:00 KST (UTC+9 → UTC 기준 00:00 / 06:00 / 12:00)
+    - cron: '0 0,6,12 * * 1-5'
+  workflow_dispatch:        # 수동 실행 지원
+    inputs:
+      days_back:
+        description: '조회 기간 (오늘 기준 ±일수, 기본 90일)'
+        required: false
+        default: '90'
+
+jobs:
+  scrape:
+    name: DART IPO 공모게시판 수집
+    runs-on: ubuntu-latest
+    timeout-minutes: 30       # 최대 30분 제한
+
+    steps:
+      # ── 1. 소스 체크아웃 ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python 환경 설정 ───────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. 의존성 설치 ────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 4. 스크래퍼 실행 ─────────────────────────────────────────
+      - name: Run DART IPO scraper
+        run: python main.py
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DB_ID:   ${{ secrets.NOTION_DB_ID }}
+          DART_SEARCH_DAYS: ${{ github.event.inputs.days_back || '90' }}
+
+      # ── 5. last_run.json 커밋 (선택: 상태 보존) ──────────────────
+      - name: Commit run state
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/last_run.json || true
+          git diff --staged --quiet || git commit -m "chore: update last_run.json [skip ci]"
+          git push || true
+
+      # ── 6. 로그 업로드 (실패 시) ─────────────────────────────────
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
