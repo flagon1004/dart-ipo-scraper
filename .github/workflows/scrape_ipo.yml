@@ -20,11 +20,11 @@ jobs:
     steps:
       # ── 1. 소스 체크아웃 ──────────────────────────────────────────
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── 2. Python 환경 설정 ───────────────────────────────────────
       - name: Setup Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -56,7 +56,7 @@ jobs:
       # ── 6. 로그 업로드 (실패 시) ─────────────────────────────────
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: scraper-logs-${{ github.run_id }}
           path: logs/
