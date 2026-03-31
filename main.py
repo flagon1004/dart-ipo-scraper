@@ -1,192 +1,205 @@
 """
-main.py - DART IPO 자동 수집 파이프라인 엔트리포인트
+main.py
+DART IPO 스크래퍼 엔트리포인트
 
-실행 흐름:
-  STEP 1: DART 공모게시판 스크래핑 (보통주 필터)
-  STEP 2: Notion DB 동기화 (신규 등록 / 변경 업데이트)
-  STEP 3: 38커뮤니케이션 기관 수요예측 경쟁률 보강
-  STEP 4: 실행 결과 저장
+실행 순서:
+  STEP 1: DART 공모게시판 스크래핑 (기타법인 + 보통주 필터)
+  STEP 2: 데이터 정제
+  STEP 3: Notion DB 동기화 (3단계 중복 방지 upsert)
+  STEP 4: 기관 수요예측 경쟁률 보강 (38커뮤니케이션)
+  STEP 5: 실행 결과 저장
 """
 
 import json
 import logging
 import os
-import sys
-import time
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 
 import config
-from scraper    import DartScraper
-from scraper_38 import Com38Scraper
-from parser     import clean_and_filter, merge_detail
-from notion_client import NotionClient
+import scraper
+import parser
+import scraper_38
+import notion_client
 
-# ── 로깅 설정 ──────────────────────────────────────────────────────────────
 
-os.makedirs(config.LOG_DIR,  exist_ok=True)
-os.makedirs(config.DATA_DIR, exist_ok=True)
+# ── 로깅 설정 ────────────────────────────────────────────────
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(config.LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
+def _setup_logging():
+    Path(config.LOG_DIR).mkdir(exist_ok=True)
+    log_path = Path(config.LOG_DIR) / config.LOG_FILENAME
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # 파일 핸들러
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    fh.setLevel(logging.DEBUG)
+
+    # 콘솔 핸들러
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    ch.setLevel(logging.INFO)
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.addHandler(fh)
+    root.addHandler(ch)
+
+
 logger = logging.getLogger(__name__)
 
 
-# ── 실행 상태 저장/로드 ────────────────────────────────────────────────────
+# ── 실행 상태 저장 ───────────────────────────────────────────
 
-def load_last_run() -> dict:
-    """마지막 실행 상태 로드"""
-    if os.path.exists(config.LAST_RUN_FILE):
-        try:
-            with open(config.LAST_RUN_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
+def _save_run_status(stats: dict):
+    path = Path("data/last_run.json")
+    path.parent.mkdir(exist_ok=True)
+    stats["timestamp"] = datetime.now(timezone.utc).isoformat()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+    logger.info(f"실행 결과 저장: {path}")
 
 
-def save_last_run(status: dict):
-    """실행 결과 저장"""
-    status["last_run_at"] = datetime.now().isoformat()
-    try:
-        with open(config.LAST_RUN_FILE, "w", encoding="utf-8") as f:
-            json.dump(status, f, ensure_ascii=False, indent=2)
-    except IOError as e:
-        logger.warning(f"last_run.json 저장 실패: {e}")
+# ── 환경 변수 검증 ───────────────────────────────────────────
+
+def _validate_env() -> bool:
+    missing = []
+    if not config.NOTION_API_KEY:
+        missing.append("NOTION_API_KEY")
+    if not config.NOTION_DB_ID:
+        missing.append("NOTION_DB_ID")
+    if missing:
+        logger.error(f"필수 환경 변수 누락: {', '.join(missing)}")
+        return False
+    return True
 
 
-# ── 메인 파이프라인 ────────────────────────────────────────────────────────
+# ── 메인 파이프라인 ──────────────────────────────────────────
 
 def main():
-    start_time = time.time()
+    _setup_logging()
     logger.info("=" * 60)
-    logger.info("DART IPO 자동 수집 파이프라인 시작")
-    logger.info(f"실행 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("DART IPO 스크래퍼 시작")
     logger.info("=" * 60)
 
-    # 환경 변수 체크
-    if not config.NOTION_API_KEY or not config.NOTION_DB_ID:
-        logger.error("NOTION_API_KEY 또는 NOTION_DB_ID 환경 변수가 없습니다.")
-        sys.exit(1)
+    # 환경 변수 검증
+    if not _validate_env():
+        raise SystemExit(1)
 
     stats = {
-        "new":     0,   # 신규 등록 건수
-        "updated": 0,   # 업데이트 건수
-        "rate":    0,   # 경쟁률 보강 건수
-        "errors":  0,   # 오류 건수
+        "dart_scraped":  0,
+        "dart_filtered": 0,
+        "notion_created": 0,
+        "notion_updated": 0,
+        "notion_skipped": 0,
+        "competition_updated": 0,
+        "errors": [],
     }
 
-    # ── STEP 1: DART 공모게시판 스크래핑 ──────────────────────────────────
+    # ── STEP 1: DART 공모게시판 스크래핑 ─────────────────────
     logger.info("\n[STEP 1] DART 공모게시판 스크래핑")
+    logger.info("필터: 기타법인(title='기타법인') AND 보통주(title='보통주')")
     try:
-        dart_scraper = DartScraper()
-        raw_data     = dart_scraper.fetch_ipo_board()
-        ipo_list     = clean_and_filter(raw_data, 증권종류="보통주")
+        raw_list = scraper.fetch_ipo_board()
+        stats["dart_scraped"] = len(raw_list)
+        logger.info(f"스크래핑 완료: {len(raw_list)}건 (필터 적용 후)")
     except Exception as e:
-        logger.error(f"DART 스크래핑 실패: {e}", exc_info=True)
-        stats["errors"] += 1
-        ipo_list = []
+        logger.error(f"STEP 1 실패: {e}")
+        stats["errors"].append(f"STEP1: {e}")
+        _save_run_status(stats)
+        raise
 
-    logger.info(f"수집된 보통주 IPO: {len(ipo_list)}건")
-
-    # 상세 페이지에서 공모가/주관사 보강
-    for item in ipo_list:
-        rcept_no = item.get("접수번호", "")
-        if rcept_no:
-            try:
-                detail = dart_scraper.fetch_report_detail(rcept_no)
-                item.update({k: v for k, v in detail.items() if v is not None})
-            except Exception as e:
-                logger.warning(f"상세 조회 실패 ({item.get('종목명')}): {e}")
-
-    # ── STEP 2: Notion DB 동기화 ──────────────────────────────────────────
-    logger.info("\n[STEP 2] Notion DB 동기화")
+    # ── STEP 2: 데이터 정제 ──────────────────────────────────
+    logger.info("\n[STEP 2] 데이터 정제")
     try:
-        notion = NotionClient()
-    except ValueError as e:
-        logger.error(str(e))
-        sys.exit(1)
+        ipo_list = parser.clean_and_filter(raw_list)
+        stats["dart_filtered"] = len(ipo_list)
+        logger.info(f"정제 완료: {len(ipo_list)}건")
+    except Exception as e:
+        logger.error(f"STEP 2 실패: {e}")
+        stats["errors"].append(f"STEP2: {e}")
+        _save_run_status(stats)
+        raise
+
+    # ── STEP 3: Notion DB 동기화 ─────────────────────────────
+    logger.info("\n[STEP 3] Notion DB 동기화 (중복 방지 upsert)")
+    logger.info(
+        "중복 판단 기준:\n"
+        "  1단계: 로컬 캐시 (동일 실행 내 중복)\n"
+        "  2단계: Notion 접수번호 쿼리 (영구 중복)\n"
+        "  3단계: Notion 종목명 쿼리 (접수번호 없는 경우 폴백)"
+    )
+
+    # 로컬 캐시: 이번 실행에서 처리한 접수번호/종목명 집합
+    local_cache: set[str] = set()
 
     for item in ipo_list:
-        종목명   = item.get("종목명", "")
-        접수번호 = item.get("접수번호", "")
-
         try:
-            # 중복 체크: 접수번호 우선, 없으면 종목명
-            existing = None
-            if 접수번호:
-                existing = notion.find_page_by_rcept_no(접수번호)
-            if not existing:
-                existing = notion.find_page_by_name(종목명)
-
-            if not existing:
-                # 신규 등록
-                notion.create_ipo_page(item)
-                logger.info(f"  [신규] {종목명}")
-                stats["new"] += 1
+            result = notion_client.upsert_ipo(item, local_cache)
+            if result == "created":
+                stats["notion_created"] += 1
+            elif result == "updated":
+                stats["notion_updated"] += 1
             else:
-                # 변경 업데이트
-                changed = notion.update_if_changed(existing, item)
-                if changed:
-                    logger.info(f"  [갱신] {종목명}")
-                    stats["updated"] += 1
-
+                stats["notion_skipped"] += 1
         except Exception as e:
-            logger.error(f"  [오류] {종목명}: {e}", exc_info=True)
-            stats["errors"] += 1
+            name = item.get("종목명", "?")
+            logger.error(f"Notion upsert 실패: {name} | {e}")
+            stats["errors"].append(f"STEP3-{name}: {e}")
 
-    # ── STEP 3: 기관 수요예측 경쟁률 보강 (38커뮤니케이션) ──────────────────
-    logger.info("\n[STEP 3] 기관 수요예측 경쟁률 보강 (38커뮤니케이션)")
+    logger.info(
+        f"Notion 동기화 완료: "
+        f"신규={stats['notion_created']}, "
+        f"업데이트={stats['notion_updated']}, "
+        f"중복skip={stats['notion_skipped']}"
+    )
+
+    # ── STEP 4: 경쟁률 보강 (38커뮤니케이션) ────────────────
+    logger.info("\n[STEP 4] 기관 수요예측 경쟁률 보강 (38커뮤니케이션)")
     try:
-        pending = notion.query_pending_competition()
-        scraper38 = Com38Scraper()
+        # 경쟁률이 비어 있는 페이지 목록 조회
+        pending = notion_client.query_pending_competition()
+        logger.info(f"경쟁률 미수집 종목: {len(pending)}건")
 
         for page in pending:
-            종목명 = page["종목명"]
-            page_id = page["id"]
-
-            if not 종목명:
+            name    = page.get("종목명", "")
+            page_id = page.get("id", "")
+            if not name or not page_id:
                 continue
 
-            try:
-                rate = scraper38.fetch_demand_forecast_rate(종목명)
-                if rate is not None:
-                    notion.update_competition_rate(page_id, rate)
-                    logger.info(f"  [경쟁률] {종목명}: {rate}:1")
-                    stats["rate"] += 1
-                else:
-                    logger.debug(f"  [경쟁률 미확인] {종목명} (수요예측 전)")
-            except Exception as e:
-                logger.warning(f"  [경쟁률 오류] {종목명}: {e}")
+            rate = scraper_38.fetch_demand_forecast_rate(name)
+            if rate is not None:
+                ok = notion_client.update_competition_rate(page_id, rate)
+                if ok:
+                    stats["competition_updated"] += 1
+                    logger.info(f"[경쟁률 갱신] {name}: {rate}:1")
+            else:
+                logger.debug(f"[경쟁률 미확인] {name}: 수요예측 전 또는 정보 없음")
 
     except Exception as e:
-        logger.error(f"경쟁률 보강 단계 실패: {e}", exc_info=True)
-        stats["errors"] += 1
+        logger.error(f"STEP 4 실패: {e}")
+        stats["errors"].append(f"STEP4: {e}")
 
-    # ── STEP 4: 실행 결과 저장 ────────────────────────────────────────────
-    elapsed = round(time.time() - start_time, 1)
-    stats["elapsed_sec"] = elapsed
+    # ── STEP 5: 실행 결과 저장 ───────────────────────────────
+    logger.info("\n[STEP 5] 실행 결과 저장")
+    _save_run_status(stats)
 
+    # ── 최종 요약 ─────────────────────────────────────────────
     logger.info("\n" + "=" * 60)
-    logger.info("파이프라인 완료")
-    logger.info(f"  신규 등록: {stats['new']}건")
-    logger.info(f"  정보 갱신: {stats['updated']}건")
-    logger.info(f"  경쟁률 보강: {stats['rate']}건")
-    logger.info(f"  오류: {stats['errors']}건")
-    logger.info(f"  소요 시간: {elapsed}초")
+    logger.info("실행 완료 요약")
+    logger.info(f"  DART 수집: {stats['dart_scraped']}건")
+    logger.info(f"  정제 후:   {stats['dart_filtered']}건")
+    logger.info(f"  Notion 신규:    {stats['notion_created']}건")
+    logger.info(f"  Notion 업데이트: {stats['notion_updated']}건")
+    logger.info(f"  Notion 중복skip: {stats['notion_skipped']}건")
+    logger.info(f"  경쟁률 갱신:    {stats['competition_updated']}건")
+    if stats["errors"]:
+        logger.warning(f"  오류 {len(stats['errors'])}건: {stats['errors']}")
     logger.info("=" * 60)
-
-    save_last_run(stats)
-
-    # 오류가 있으면 비정상 종료 (GitHub Actions에서 실패 감지용)
-    if stats["errors"] > 0:
-        sys.exit(1)
 
 
 if __name__ == "__main__":
