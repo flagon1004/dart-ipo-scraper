@@ -20,7 +20,7 @@ import config
 import scraper
 import parser
 import scraper_38
-import notion_client
+import notion_handler as notion_client
 
 
 # ── 로깅 설정 ────────────────────────────────────────────────
