@@ -136,6 +136,60 @@ def query_pending_competition() -> list[dict]:
     return results
 
 
+def query_pages_with_listing_date() -> list[dict]:
+    """
+    상장일자가 존재하고 경쟁률이 비어 있는 Notion 페이지 목록 반환.
+
+    조건:
+      - 상장일자(Date) : is_not_empty   → 상장일자가 확정된 종목
+      - 경쟁률(Number) : is_empty       → 아직 경쟁률 미수집 종목
+
+    상장일자가 확정됐다는 것은 수요예측이 완료됐음을 의미하므로
+    Gemini 검색으로 경쟁률을 확보할 수 있는 상태임.
+    """
+    url  = f"{config.NOTION_BASE_URL}/databases/{config.NOTION_DB_ID}/query"
+    body = {
+        "filter": {
+            "and": [
+                {
+                    "property": config.NOTION_FIELD["상장일자"],
+                    "date": {"is_not_empty": True}
+                },
+                {
+                    "property": config.NOTION_FIELD["경쟁률"],
+                    "number": {"is_empty": True}
+                },
+            ]
+        }
+    }
+    data = _safe_request("post", url, json=body)
+    _rate_limit()
+
+    if not data:
+        return []
+
+    results = []
+    for page in data.get("results", []):
+        props      = page.get("properties", {})
+        name_prop  = props.get(config.NOTION_FIELD["종목명"], {})
+        title_list = name_prop.get("title", [])
+        name       = title_list[0]["text"]["content"] if title_list else ""
+
+        # 상장일자도 함께 추출 (로그용)
+        listing_prop = props.get(config.NOTION_FIELD["상장일자"], {})
+        listing_date = (listing_prop.get("date") or {}).get("start", "")
+
+        results.append({
+            "id":     page["id"],
+            "종목명": name,
+            "상장일자": listing_date,
+        })
+        logger.debug(f"경쟁률 보강 대상: {name} (상장일자={listing_date})")
+
+    logger.info(f"경쟁률 보강 대상: {len(results)}건 (상장일자 有 & 경쟁률 無)")
+    return results
+
+
 # ── 생성 / 업데이트 ──────────────────────────────────────────
 
 def _build_properties(data: dict) -> dict:
@@ -341,3 +395,4 @@ def upsert_ipo(data: dict, local_cache: set[str]) -> str:
     logger.info(f"[SKIP-변경없음] {name}")
     local_cache.add(cache_key)
     return "skipped"
+
