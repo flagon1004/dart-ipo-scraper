@@ -41,7 +41,7 @@ jobs:
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DB_ID:   ${{ secrets.NOTION_DB_ID }}
-          DART_SEARCH_DAYS: ${{ github.event.inputs.days_back || '7' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
 
       # ── 5. last_run.json 커밋 (선택: 상태 보존) ──────────────────
       - name: Commit run state
