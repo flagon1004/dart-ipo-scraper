@@ -1,10 +1,10 @@
 """
 gemini_fetcher.py
-Gemini Flash 2.0 + Google Search Grounding을 사용하여
+Gemini Flash 2.5 + Google Search Grounding을 사용하여
 기관 수요예측 경쟁률을 실시간 검색·파싱하는 모듈
 
 동작 방식:
-  - Gemini 2.0 Flash 의 googleSearch 도구(grounding)를 활성화
+  - Gemini 2.5 Flash 의 googleSearch 도구(grounding)를 활성화
   - "종목명 기관 수요예측 경쟁률" 쿼리로 Google 검색 결과를 기반으로 답변 생성
   - 응답 텍스트에서 경쟁률 숫자를 정규식으로 추출
   - 상장일자가 확정된 종목에 대해서만 호출 (수요예측 완료 보장)
@@ -47,7 +47,7 @@ _PROMPT_TEMPLATE = """\
 
 def _call_gemini(prompt: str) -> str | None:
     """
-    Gemini Flash 2.0 API 호출 (Google Search Grounding 활성화).
+    Gemini Flash 2.5 API 호출 (Google Search Grounding 활성화).
 
     Returns
     -------
