@@ -50,7 +50,7 @@ NOTION_FIELD = {
 
 # ── Gemini API ───────────────────────────────────────────────
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL    = "gemini-2.0-flash"   # Google Search Grounding 지원
+GEMINI_MODEL    = "gemini-2.5-flash"   # Google Search Grounding 지원
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_DELAY_SEC = 4.0   # Free Tier 15 req/min 기준
 
