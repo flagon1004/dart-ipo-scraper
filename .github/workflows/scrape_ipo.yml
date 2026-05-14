@@ -2,8 +2,8 @@ name: DART IPO Scraper
 
 on:
   schedule:
-    # 평일 09:00 / 15:00 / 21:00 KST (UTC+9 → UTC 기준 00:00 / 06:00 / 12:00)
-    - cron: '0 0,6,12 * * 1-5'
+    - cron: "0 1 * * 0"   # UTC 01:00 = KST 10:00, 매주 일요일
+    
   workflow_dispatch:        # 수동 실행 지원
     inputs:
       days_back:
